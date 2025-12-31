@@ -1,0 +1,31 @@
+services:
+  db:
+    image: postgres:16
+    container_name: travel_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: travel_agentic
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata_travel:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d travel_agentic"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    container_name: travel_api
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:5000"
+
+volumes:
+  pgdata_travel:

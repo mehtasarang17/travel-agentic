@@ -1,0 +1,174 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Agentic Travel Planner</title>
+
+  <!-- ✅ Price visualization (instead of Mermaid) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 16px; align-items: stretch; }
+    .panel { border: 1px solid #ddd; border-radius: 8px; padding: 12px; flex: 1; }
+    textarea { width: 100%; height: 70px; }
+    button { padding: 8px 12px; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { border: 1px solid #eee; padding: 6px; text-align: left; font-size: 13px; }
+    pre { background: #fafafa; padding: 8px; overflow: auto; }
+    .muted { color: #666; font-size: 12px; }
+    .charts h4 { margin: 12px 0 6px; }
+    canvas { width: 100% !important; height: 260px !important; }
+  </style>
+</head>
+
+<body>
+  <h2>Agentic Travel Planner (Master + 3 Agents)</h2>
+  <div class="muted">Try: “I want to travel from Delhi to Bombay on Jan 15th 2026”</div>
+
+  <div class="panel">
+    <textarea id="msg" placeholder="Type your travel request..."></textarea>
+    <button onclick="send()">Send</button>
+    <div class="muted">conversation_id: <span id="cid">-</span></div>
+    <h3>Assistant Reply</h3>
+    <pre id="reply"></pre>
+  </div>
+
+  <div class="row">
+    <!-- ✅ Price charts panel -->
+    <div class="panel charts">
+      <h3>Price Visualization</h3>
+      <div class="muted">Top 10 cheapest options (updates after each query).</div>
+
+      <h4>Flights</h4>
+      <canvas id="chartFlights"></canvas>
+
+      <h4>Hotels</h4>
+      <canvas id="chartHotels"></canvas>
+
+      <h4>Cabs</h4>
+      <canvas id="chartCabs"></canvas>
+    </div>
+
+    <div class="panel">
+      <h3>Trace</h3>
+      <pre id="trace"></pre>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Results</h3>
+    <div id="results"></div>
+  </div>
+
+<script>
+  let conversationId = null;
+
+  // Keep references so we can destroy and re-render charts cleanly
+  const charts = { flights: null, hotels: null, cabs: null };
+
+  function destroyChart(key) {
+    if (charts[key]) {
+      charts[key].destroy();
+      charts[key] = null;
+    }
+  }
+
+  function renderTable(title, rows) {
+    if (!rows || !rows.length) return "";
+    const cols = Object.keys(rows[0]);
+    let html = `<h4>${title}</h4><table><thead><tr>`;
+    for (const c of cols) html += `<th>${c}</th>`;
+    html += `</tr></thead><tbody>`;
+    for (const r of rows.slice(0, 10)) {
+      html += "<tr>";
+      for (const c of cols) html += `<td>${r[c]}</td>`;
+      html += "</tr>";
+    }
+    html += "</tbody></table>";
+    return html;
+  }
+
+  function renderBarChart(canvasId, label, labels, values) {
+    const el = document.getElementById(canvasId);
+    if (!el) return null;
+
+    return new Chart(el, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [{ label, data: values }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true }
+        },
+        scales: {
+          y: { beginAtZero: true }
+        }
+      }
+    });
+  }
+
+  function safeNum(x) {
+    const n = Number(x);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  async function send() {
+    const msg = document.getElementById("msg").value.trim();
+    if (!msg) return;
+
+    const res = await fetch("/chat", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ message: msg, conversation_id: conversationId })
+    });
+
+    const data = await res.json();
+
+    conversationId = data.conversation_id;
+    document.getElementById("cid").innerText = conversationId;
+
+    document.getElementById("reply").innerText = data.reply || "";
+    document.getElementById("trace").innerText = JSON.stringify(data.trace || [], null, 2);
+
+    // Results tables
+    const out = [];
+    const results = data.results || {};
+    if (results.flights?.flights) out.push(renderTable("Flights (top 10)", results.flights.flights));
+    if (results.hotels?.hotels) out.push(renderTable("Hotels (top 10)", results.hotels.hotels));
+    if (results.cabs?.cabs) out.push(renderTable("Cabs (top 10)", results.cabs.cabs));
+    document.getElementById("results").innerHTML = out.join("") || "<div class='muted'>No results yet.</div>";
+
+    // ✅ Price charts (top 10 cheapest)
+    destroyChart("flights");
+    destroyChart("hotels");
+    destroyChart("cabs");
+
+    const flights = (results.flights?.flights || []).slice(0, 10);
+    const hotels  = (results.hotels?.hotels || []).slice(0, 10);
+    const cabs    = (results.cabs?.cabs || []).slice(0, 10);
+
+    const flightLabels = flights.map(f => {
+      const a = (f.airline || "").toString();
+      const n = (f.flight_no || "").toString();
+      return (a + " " + n).trim() || `${f.origin || ""}-${f.destination || ""}`.trim();
+    });
+    const flightValues = flights.map(f => safeNum(f.price_inr));
+
+    const hotelLabels = hotels.map(h => (h.name || h.city || "Hotel").toString());
+    const hotelValues = hotels.map(h => safeNum(h.price_per_night_inr));
+
+    const cabLabels = cabs.map(c => `${c.vendor || "Cab"} ${c.type || ""}`.trim());
+    const cabValues = cabs.map(c => safeNum(c.fare_inr));
+
+    if (flightLabels.length) charts.flights = renderBarChart("chartFlights", "Price (INR)", flightLabels, flightValues);
+    if (hotelLabels.length)  charts.hotels  = renderBarChart("chartHotels", "Price/Night (INR)", hotelLabels, hotelValues);
+    if (cabLabels.length)    charts.cabs    = renderBarChart("chartCabs", "Fare (INR)", cabLabels, cabValues);
+  }
+</script>
+</body>
+</html>
