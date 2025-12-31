@@ -1,59 +1,97 @@
 import os
-from amadeus import Client, ResponseError
+from typing import Dict, List, Optional, Tuple
+
+from amadeus import Client, ResponseError, Location
 from app.providers.base import HotelsProvider
 
-# Minimal city -> IATA city code mapping (expand as needed)
-CITY_TO_IATA = {
-    "Delhi": "DEL",
-    "New Delhi": "DEL",
-    "Mumbai": "BOM",
-    "Bombay": "BOM",
-    "Bangalore": "BLR",
-    "Bengaluru": "BLR",
-    "Hyderabad": "HYD",
-    "Chennai": "MAA",
-    "Kolkata": "CCU",
-    "Goa": "GOI",  # sometimes GOI used as airport; Amadeus hotel list expects cityCode; adjust if needed
-}
+from app.providers.amadeus_flights import UnknownLocationError  # reuse same error type
+
 
 class AmadeusHotelsProvider(HotelsProvider):
+    """
+    Zero hardcoding:
+    - Resolve user city text -> IATA city code via Airport & City Search
+    - Get hotelIds by cityCode
+    - Fetch offers by hotelIds + dates
+    :contentReference[oaicite:2]{index=2}
+    """
+
     def __init__(self):
-        # Uses env vars if present (client_id/secret)
         self.client = Client(
             client_id=os.getenv("AMADEUS_CLIENT_ID"),
             client_secret=os.getenv("AMADEUS_CLIENT_SECRET"),
             hostname=os.getenv("AMADEUS_HOSTNAME", "test"),
         )
+        self._city_cache: Dict[str, str] = {}
 
-    def _to_city_code(self, city_or_code: str) -> str | None:
-        x = (city_or_code or "").strip()
-        if len(x) == 3 and x.isalpha():
-            return x.upper()
-        return CITY_TO_IATA.get(x.title())
+    @staticmethod
+    def _norm(s: str) -> str:
+        return (s or "").strip().lower()
+
+    def _search_cities(self, keyword: str, max_items: int = 6) -> List[dict]:
+        try:
+            resp = self.client.reference_data.locations.get(
+                keyword=keyword,
+                subType=Location.CITY,  # only city codes
+            )
+        except ResponseError:
+            return []
+
+        out = []
+        for it in (resp.data or [])[: max_items * 2]:
+            code = it.get("iataCode")
+            if not code:
+                continue
+            address = it.get("address") or {}
+            out.append({
+                "name": it.get("name"),
+                "iataCode": code,
+                "countryCode": address.get("countryCode"),
+                "cityName": address.get("cityName"),
+            })
+        return out[:max_items]
+
+    def _resolve_city_code(self, city_text: str) -> str:
+        raw = (city_text or "").strip()
+        if not raw:
+            raise UnknownLocationError("city", city_text, [])
+
+        # allow direct city IATA
+        if len(raw) == 3 and raw.isalpha():
+            return raw.upper()
+
+        key = self._norm(raw)
+        if key in self._city_cache:
+            return self._city_cache[key]
+
+        candidates = self._search_cities(raw)
+        if not candidates and len(raw) >= 3:
+            candidates = self._search_cities(raw[:3])
+
+        if not candidates:
+            raise UnknownLocationError("city", raw, [])
+
+        code = candidates[0]["iataCode"].upper()
+        self._city_cache[key] = code
+        return code
+
+    def _get_hotel_ids_by_city(self, city_code: str, limit: int = 15) -> List[str]:
+        try:
+            resp = self.client.reference_data.locations.hotels.by_city.get(cityCode=city_code)
+        except ResponseError as e:
+            raise RuntimeError(str(e))
+
+        ids = [h.get("hotelId") for h in (resp.data or []) if h.get("hotelId")]
+        return ids[:limit]
 
     def search_hotels(self, city: str, checkin: str, checkout: str, adults: int = 1) -> list[dict]:
-        """
-        Returns list of hotels w/ prices (cheapest first).
-        Flow:
-          1) /reference-data/locations/hotels/by-city -> hotelIds
-          2) /shopping/hotel-offers -> offers with price/rate
-        """
-        city_code = self._to_city_code(city)
-        if not city_code:
-            raise ValueError("Unknown city. Use IATA city code like DEL/BOM or supported city names.")
+        city_code = self._resolve_city_code(city)
+
+        hotel_ids = self._get_hotel_ids_by_city(city_code, limit=15)
+        if not hotel_ids:
+            return []
 
         try:
-            # 1) Get hotels by city code
-            hotels_by_city = self.client.reference_data.locations.hotels.by_city.get(
-                cityCode=city_code
-            )
-            hotel_ids = [h.get("hotelId") for h in (hotels_by_city.data or []) if h.get("hotelId")]
-            hotel_ids = hotel_ids[:15]  # keep it small for speed/rate limits
-
-            if not hotel_ids:
-                return []
-
-            # 2) Get hotel offers (v3) for those hotelIds
             offers = self.client.shopping.hotel_offers_search.get(
                 hotelIds=hotel_ids,
                 adults=str(adults),
@@ -61,49 +99,46 @@ class AmadeusHotelsProvider(HotelsProvider):
                 checkOutDate=checkout,
             )
         except ResponseError as e:
-            # Amadeus SDK provides nice error objects; stringify for now
             raise RuntimeError(str(e))
 
-        out = []
-        for hotel in (offers.data or []):
-            hotel_info = hotel.get("hotel", {})
-            name = hotel_info.get("name")
-            rating = hotel_info.get("rating") or hotel_info.get("hotelRating")  # sometimes differs
-            hotel_id = hotel_info.get("hotelId") or hotel.get("hotelId")
+        nights = max(1, _nights_between(checkin, checkout))
 
-            # Pick cheapest offer for this hotel
-            cheapest_price = None
-            cheapest_offer = None
-            for off in (hotel.get("offers") or []):
-                price_total = off.get("price", {}).get("total")
-                if price_total is None:
+        out = []
+        for item in (offers.data or []):
+            hotel_info = item.get("hotel", {}) or {}
+            name = hotel_info.get("name") or "Unknown"
+            rating = hotel_info.get("rating") or hotel_info.get("hotelRating")
+            hotel_id = hotel_info.get("hotelId") or item.get("hotelId")
+
+            cheapest_total = None
+            cheapest_offer_id = None
+
+            for off in (item.get("offers") or []):
+                total = off.get("price", {}).get("total")
+                if total is None:
                     continue
                 try:
-                    p = float(price_total)
+                    total_f = float(total)
                 except Exception:
                     continue
-                if cheapest_price is None or p < cheapest_price:
-                    cheapest_price = p
-                    cheapest_offer = off
 
-            if cheapest_price is None:
+                if cheapest_total is None or total_f < cheapest_total:
+                    cheapest_total = total_f
+                    cheapest_offer_id = off.get("id")
+
+            if cheapest_total is None:
                 continue
-
-            # Convert total stay price to per-night (rough)
-            nights = max(1, _nights_between(checkin, checkout))
-            per_night = round(cheapest_price / nights, 2)
 
             out.append({
                 "name": name,
                 "city": city_code,
                 "hotel_id": hotel_id,
                 "rating": rating,
-                "price_total_inr": cheapest_price,         # total for stay
-                "price_per_night_inr": per_night,          # derived
-                "offer_id": (cheapest_offer or {}).get("id"),
+                "price_total_inr": cheapest_total,
+                "price_per_night_inr": round(cheapest_total / nights, 2),
+                "offer_id": cheapest_offer_id,
             })
 
-        # Cheapest first
         return sorted(out, key=lambda x: x["price_total_inr"])
 
 

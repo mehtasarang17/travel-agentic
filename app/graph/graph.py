@@ -4,9 +4,9 @@ from app.graph.state import TravelState
 from app.llm.dialogue_manager import plan_next_step
 
 # Providers
-from app.providers.amadeus_flights import AmadeusFlightsProvider
+from app.providers.amadeus_flights import AmadeusFlightsProvider, UnknownLocationError
 from app.providers.amadeus_hotels import AmadeusHotelsProvider
-from app.providers.mock_cabs import MockCabsProvider
+from app.providers.amadeus_cabs import AmadeusCabsProvider, UnknownLocationError
 
 # Agents
 from app.agents.hotels import run_hotels_agent
@@ -18,8 +18,7 @@ from app.agents.cabs import run_cabs_agent
 # ---------------------------
 flights_provider = AmadeusFlightsProvider()
 hotels_provider = AmadeusHotelsProvider()
-cabs_provider = MockCabsProvider()
-
+cabs_provider = AmadeusCabsProvider()
 
 # ---------------------------
 # Utilities
@@ -126,6 +125,28 @@ def node_flights(state: TravelState) -> TravelState:
 
     try:
         data = run_flights_agent(flights_provider, s["origin"], s["destination"], s["date"])
+    except UnknownLocationError as e:
+    # Ask naturally (no "use IATA codes")
+        if e.suggestions:
+            opts = "\n".join(
+                [f"- {x.get('name')} ({x.get('iataCode')})"
+                + (f", {x.get('countryCode')}" if x.get("countryCode") else "")
+                for x in e.suggestions[:5]]
+            )
+            q = (
+                f"I couldn’t find a matching {e.field} for “{e.query}”. Did you mean one of these?\n"
+                f"{opts}\n\nReply with the correct one."
+            )
+        else:
+            q = (
+                f"I couldn’t find a matching {e.field} for “{e.query}”. "
+                "Please tell me a nearby major airport/city (e.g., ‘near Surat’, ‘near Pune’)."
+            )
+
+        state["reply"] = q
+        state["next_question"] = q
+        add_trace(state, "flights_unknown_location", {"field": e.field, "query": e.query, "suggestions": e.suggestions})
+        return state
     except Exception as e:
         q = f"Flight search failed: {str(e)}. Try a different date/city."
         state["reply"] = q
@@ -192,6 +213,15 @@ def node_hotels(state: TravelState) -> TravelState:
 
     try:
         data = run_hotels_agent(hotels_provider, s["city"], s["checkin"], s["checkout"])
+    except UnknownLocationError as e:
+        q = (
+            f"I couldn’t find the city “{e.query}”. "
+            "Please confirm the city and country/state (e.g., ‘Springfield, IL, USA’)."
+        )
+        state["reply"] = q
+        state["next_question"] = q
+        add_trace(state, "hotels_unknown_city", {"query": e.query})
+        return state
     except Exception as e:
         q = f"Hotel search failed: {str(e)}. Try another city (DEL/BOM) or dates."
         state["reply"] = q
@@ -253,13 +283,12 @@ def node_cabs(state: TravelState) -> TravelState:
     required = ["pickup", "dropoff"]
     missing = [k for k in required if not s.get(k)]
     if missing:
-        # Ask for hotel selection if pickup known but dropoff missing
         if "dropoff" in missing and s.get("pickup"):
-            q = "Which hotel did you select? (Type the hotel name)"
+            q = "Which hotel (or area/address) is your drop-off? (Example: 'Courtyard Mumbai Airport' or 'BOM' or a full address)"
         elif "pickup" in missing:
-            q = "Where should the cab pick you up from? (e.g., Mumbai Airport)"
+            q = "Where should the cab pick you up from? (Example: 'Mumbai Airport' or 'BOM')"
         else:
-            q = f"I need: {', '.join(missing)} to search cabs."
+            q = f"I need: {', '.join(missing)} to search transfers."
 
         state["reply"] = q
         state["next_question"] = q
@@ -271,8 +300,36 @@ def node_cabs(state: TravelState) -> TravelState:
 
     try:
         data = run_cabs_agent(cabs_provider, s["pickup"], s["dropoff"])
+
+    except UnknownLocationError as e:
+        # Ask the right question depending on which field failed
+        if e.field == "pickup":
+            q = (
+                f"I couldn't resolve the pickup location “{e.query}”.\n\n"
+                "For Amadeus Transfers, reply with either:\n"
+                "1) a city/airport name (e.g., 'Mumbai Airport' / 'BOM'), OR\n"
+                "2) a full pickup address.\n\n"
+                "What should be your exact pickup?"
+            )
+        else:
+            q = (
+                f"I couldn't resolve the drop-off location “{e.query}”.\n\n"
+                "For Amadeus Transfers, reply with either:\n"
+                "1) a city/airport name (e.g., 'Mumbai Airport' / 'BOM'), OR\n"
+                "2) a full drop-off address/area.\n\n"
+                "What should be your exact drop-off?"
+            )
+
+        state["reply"] = q
+        state["next_question"] = q
+        add_trace(state, "cabs_unknown_location", {"field": e.field, "query": e.query, "suggestions": getattr(e, "suggestions", None)})
+
+        _ctx_history_append(ctx, "assistant", q)
+        ctx["last_reply"] = q
+        return _persist_context(state, ctx)
+
     except Exception as e:
-        q = f"Cab search failed: {str(e)}"
+        q = f"Transfer search failed: {str(e)}"
         state["reply"] = q
         state["next_question"] = q
         add_trace(state, "cabs_error", {"error": str(e)})
@@ -286,7 +343,7 @@ def node_cabs(state: TravelState) -> TravelState:
 
     cheapest = data.get("cheapest")
     if not cheapest:
-        q = f"No cabs found for {s['pickup']} → {s['dropoff']}. Try changing pickup/dropoff?"
+        q = f"No transfers found for {s['pickup']} → {s['dropoff']}. Try changing pickup/dropoff?"
         state["reply"] = q
         state["next_question"] = q
         add_trace(state, "cabs_none", {})
@@ -296,9 +353,8 @@ def node_cabs(state: TravelState) -> TravelState:
         return _persist_context(state, ctx)
 
     reply = (
-        f"Cab options from {s['pickup']} to {s['dropoff']} (cheapest first).\n"
-        f"Cheapest: {cheapest.get('vendor')} {cheapest.get('type')} ₹{cheapest.get('fare_inr')} "
-        f"(ETA {cheapest.get('eta_min')} min).\n\n"
+        f"Transfer options from {s['pickup']} to {s['dropoff']} (cheapest first).\n"
+        f"Cheapest: {cheapest.get('vendor')} {cheapest.get('type')} ₹{cheapest.get('fare_inr')}.\n\n"
         "Anything else you want to add (flights/hotels)?"
     )
     state["reply"] = reply
@@ -308,7 +364,6 @@ def node_cabs(state: TravelState) -> TravelState:
     _ctx_history_append(ctx, "assistant", reply)
     ctx["last_reply"] = reply
     return _persist_context(state, ctx)
-
 
 # ---------------------------
 # Build graph

@@ -40,7 +40,7 @@ Rules:
    Example: after flights Delhi->Mumbai on 2026-01-15, if user says "yes book hotel",
    set hotels.city=Mumbai and hotels.checkin=2026-01-15 but ask for checkout if missing.
 3) Natural language yes/no should be interpreted based on prior assistant question in history.
-4) Prefer continuing the current plan (e.g., flights -> hotels -> cabs) if user agrees.
+4) Prefer continuing the current plan (e.g., flights -> hotels -> transport) if user agrees.
 
 Output JSON schema:
 {
