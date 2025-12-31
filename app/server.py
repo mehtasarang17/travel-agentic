@@ -15,13 +15,6 @@ graph = build_graph()
 
 @app.get("/")
 def index():
-    """
-    Simple UI page that:
-      - sends messages to /chat
-      - renders results tables
-      - renders Mermaid graph
-      - shows trace list
-    """
     return render_template("index.html")
 
 
@@ -36,7 +29,6 @@ def chat():
 
     db = SessionLocal()
     try:
-        # Ensure conversation exists
         conv = db.get(Conversation, conversation_id)
         if not conv:
             conv = Conversation(id=conversation_id, context={})
@@ -44,7 +36,7 @@ def chat():
             db.commit()
             db.refresh(conv)
 
-        # Store user message
+        # store user message
         db.add(Message(
             conversation_id=conversation_id,
             role="user",
@@ -53,10 +45,8 @@ def chat():
         ))
         db.commit()
 
-        # Load conversation memory (context)
         ctx = conv.context or {}
-
-        # Run LangGraph
+        # Run LangGraph with ctx memory
         state = {
             "conversation_id": conversation_id,
             "user_input": user_input,
@@ -64,15 +54,15 @@ def chat():
         }
         out = graph.invoke(state)
 
-        # Persist updated memory if graph produced it
+        # Save updated context
         updated_ctx = out.get("updated_context")
         if isinstance(updated_ctx, dict):
             conv.context = updated_ctx
             db.add(conv)
             db.commit()
 
-        # Store assistant message
         assistant_reply = out.get("reply", "") or ""
+
         db.add(Message(
             conversation_id=conversation_id,
             role="assistant",
@@ -85,15 +75,12 @@ def chat():
         ))
         db.commit()
 
-
         return jsonify({
             "conversation_id": conversation_id,
             "reply": assistant_reply,
             "next_question": out.get("next_question"),
             "results": out.get("results", {}),
             "trace": out.get("trace", []),
-
-            # Optional: helpful for debugging
             "context": conv.context
         })
 
@@ -102,6 +89,5 @@ def chat():
 
 
 if __name__ == "__main__":
-    # Create tables (simple dev mode)
     init_db()
     app.run(host="0.0.0.0", port=5000, debug=True)
