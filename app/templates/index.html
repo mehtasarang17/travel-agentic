@@ -83,7 +83,6 @@
     .chartCard { border: 1px solid #1b2a4a; border-radius: 12px; background: #0b1427; padding: 10px; }
     canvas { width: 100% !important; height: 280px !important; }
 
-    /* Hide utility */
     .hidden { display: none !important; }
   </style>
 </head>
@@ -104,9 +103,10 @@
         <div id="chatBody" class="chatBody"></div>
 
         <div class="chips">
-          <div class="chip" onclick="setPrompt('I want to travel from Delhi to Bombay on Jan 15th 2026')">Delhi → Bombay (Flights)</div>
-          <div class="chip" onclick="setPrompt('I want to book hotel in Delhi from Jan 15th 2026 to Jan 20th 2026')">Hotel in Delhi</div>
-          <div class="chip" onclick="setPrompt('I want to book cab from Delhi airport to Taj Palace Delhi')">Cab (Airport → Hotel)</div>
+          <div class="chip" onclick="setPrompt('I want to travel from Delhi to Bombay on Jan 15th 2026')">Want to book a Flight?</div>
+          <div class="chip" onclick="setPrompt('I want to book hotel in Delhi from Jan 15th 2026 to Jan 20th 2026')">Book a Hotel Somewhere?</div>
+          <div class="chip" onclick="setPrompt('I want to book cab from Delhi airport to Taj Palace Delhi')">Want to see your Cab Options?</div>
+          <div class="chip" onclick="setPrompt('Show COVID updates for India')">Covid Updates</div>
         </div>
 
         <div class="chatInputRow">
@@ -128,24 +128,27 @@
     <h3 style="margin-top:0">Results</h3>
     <div id="results"><div class="muted">No results yet.</div></div>
 
-    <!-- Charts (hidden until relevant) -->
     <div class="chartGrid" id="chartGrid">
       <div class="chartCard hidden" id="cardFlights">
-        <div class="muted">Flights (prices cheapest → expensive)</div>
+        <div class="muted" id="lblFlights">Flights (prices cheapest → expensive)</div>
         <canvas id="chartFlights"></canvas>
       </div>
 
       <div class="chartCard hidden" id="cardHotels">
-        <div class="muted">Hotels (prices cheapest → expensive)</div>
+        <div class="muted" id="lblHotels">Hotels (prices cheapest → expensive)</div>
         <canvas id="chartHotels"></canvas>
       </div>
 
       <div class="chartCard hidden" id="cardCabs">
-        <div class="muted">Cabs/Transfers (prices cheapest → expensive)</div>
+        <div class="muted" id="lblCabs">Cabs/Transfers (prices cheapest → expensive)</div>
         <canvas id="chartCabs"></canvas>
       </div>
 
-      <!-- OPTIONAL: keep hidden unless 2+ queries -->
+      <div class="chartCard hidden" id="cardCovid">
+        <div class="muted" id="lblCovid">COVID (daily new cases, 2020 → today)</div>
+        <canvas id="chartCovid"></canvas>
+      </div>
+
       <div class="chartCard hidden" id="cardHistory">
         <div class="muted">Cheapest price over time (per query)</div>
         <canvas id="chartHistory"></canvas>
@@ -164,39 +167,16 @@
   let flightsChart = null;
   let hotelsChart  = null;
   let cabsChart    = null;
+  let covidChart   = null;
   let historyChart = null;
 
   // cheapest-over-time history
-  const queryHistory = []; // [{t, flights, hotels, cabs}]
+  const queryHistory = [];
   let queryCount = 0;
 
   function setPrompt(text){
     msgBox.value = text;
     msgBox.focus();
-  }
-
-  function hideAllChartCards(){
-    document.getElementById("cardFlights").classList.add("hidden");
-    document.getElementById("cardHotels").classList.add("hidden");
-    document.getElementById("cardCabs").classList.add("hidden");
-    document.getElementById("cardHistory").classList.add("hidden");
-  }
-
-  function showRelevantCharts(results){
-    hideAllChartCards();
-
-    const hasFlights = (results?.flights?.flights || []).length > 0;
-    const hasHotels  = (results?.hotels?.hotels   || []).length > 0;
-    const hasCabs    = (results?.cabs?.cabs       || []).length > 0;
-
-    if (hasFlights) document.getElementById("cardFlights").classList.remove("hidden");
-    if (hasHotels)  document.getElementById("cardHotels").classList.remove("hidden");
-    if (hasCabs)    document.getElementById("cardCabs").classList.remove("hidden");
-
-    // show history only after 2+ user queries (optional)
-    if (queryHistory.length >= 2) {
-      document.getElementById("cardHistory").classList.remove("hidden");
-    }
   }
 
   function clearChat(){
@@ -206,9 +186,9 @@
     conversationId = null;
     document.getElementById("cid").innerText = "-";
 
-    // reset charts + history
     queryHistory.length = 0;
     queryCount = 0;
+
     destroyCharts();
     initCharts();
     hideAllChartCards();
@@ -260,10 +240,10 @@
   }
 
   function destroyCharts(){
-    [flightsChart, hotelsChart, cabsChart, historyChart].forEach(ch => {
+    [flightsChart, hotelsChart, cabsChart, covidChart, historyChart].forEach(ch => {
       if(ch){ ch.destroy(); }
     });
-    flightsChart = hotelsChart = cabsChart = historyChart = null;
+    flightsChart = hotelsChart = cabsChart = covidChart = historyChart = null;
   }
 
   function makeLineChart(canvasId, title){
@@ -276,8 +256,8 @@
           label: title,
           data: [],
           tension: 0.25,
-          pointRadius: 3,
-          pointHoverRadius: 4,
+          pointRadius: 2,
+          pointHoverRadius: 3,
           fill: false
         }]
       },
@@ -289,7 +269,7 @@
           tooltip: { enabled: true }
         },
         scales: {
-          x: { ticks: { color: "#9db0d5" }, grid: { color: "#182a4a" } },
+          x: { ticks: { color: "#9db0d5", maxRotation: 0, autoSkip: true }, grid: { color: "#182a4a" } },
           y: { ticks: { color: "#9db0d5" }, grid: { color: "#182a4a" } }
         }
       }
@@ -303,9 +283,9 @@
       data: {
         labels: [],
         datasets: [
-          { label: "Flights (cheapest)", data: [], tension: 0.25, pointRadius: 3, fill: false },
-          { label: "Hotels (cheapest)", data: [], tension: 0.25, pointRadius: 3, fill: false },
-          { label: "Cabs (cheapest)", data: [], tension: 0.25, pointRadius: 3, fill: false },
+          { label: "Flights (cheapest)", data: [], tension: 0.25, pointRadius: 2, fill: false },
+          { label: "Hotels (cheapest)", data: [], tension: 0.25, pointRadius: 2, fill: false },
+          { label: "Cabs (cheapest)", data: [], tension: 0.25, pointRadius: 2, fill: false },
         ]
       },
       options: {
@@ -327,17 +307,14 @@
     flightsChart = makeLineChart("chartFlights", "Flight prices (INR)");
     hotelsChart  = makeLineChart("chartHotels",  "Hotel prices (INR)");
     cabsChart    = makeLineChart("chartCabs",    "Cab/Transfer prices (INR)");
+    covidChart   = makeLineChart("chartCovid",   "Daily new COVID cases (2020 → today)");
     historyChart = makeHistoryChart();
   }
 
-  function updateLineChart(chart, rows, priceFn){
-    const pts = (rows || []).slice(0, 12).map((r, i) => {
-      const p = Number(priceFn(r));
-      return Number.isFinite(p) ? { x: i + 1, y: p } : null;
-    }).filter(Boolean);
-
-    chart.data.labels = pts.map(p => String(p.x)); // 1..N
-    chart.data.datasets[0].data = pts.map(p => p.y);
+  function updateLineChart(chart, labels, values, datasetLabel){
+    if (datasetLabel) chart.data.datasets[0].label = datasetLabel;
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = values;
     chart.update();
   }
 
@@ -348,6 +325,37 @@
     historyChart.data.datasets[1].data = queryHistory.map(x => x.hotels ?? null);
     historyChart.data.datasets[2].data = queryHistory.map(x => x.cabs ?? null);
     historyChart.update();
+  }
+
+  function hideAllChartCards(){
+    document.getElementById("cardFlights").classList.add("hidden");
+    document.getElementById("cardHotels").classList.add("hidden");
+    document.getElementById("cardCabs").classList.add("hidden");
+    document.getElementById("cardCovid").classList.add("hidden");
+    document.getElementById("cardHistory").classList.add("hidden");
+  }
+
+  function showRelevantCharts(results){
+    // IMPORTANT: each response only shows relevant charts
+    hideAllChartCards();
+
+    const hasFlights = (results?.flights?.flights || []).length > 0;
+    const hasHotels  = (results?.hotels?.hotels   || []).length > 0;
+    const hasCabs    = (results?.cabs?.cabs       || []).length > 0;
+
+    // ✅ prefer full series, fallback to last14
+    const hasCovid =
+      (results?.covid?.series_daily_cases || []).length > 0 ||
+      (results?.covid?.last14_days || []).length > 0;
+
+    if (hasFlights) document.getElementById("cardFlights").classList.remove("hidden");
+    if (hasHotels)  document.getElementById("cardHotels").classList.remove("hidden");
+    if (hasCabs)    document.getElementById("cardCabs").classList.remove("hidden");
+    if (hasCovid)   document.getElementById("cardCovid").classList.remove("hidden");
+
+    if (queryHistory.length >= 2) {
+      document.getElementById("cardHistory").classList.remove("hidden");
+    }
   }
 
   async function send() {
@@ -387,27 +395,77 @@
 
       const results = data.results || {};
 
-      // show only charts relevant to THIS response
+      // show only relevant charts for THIS response
       showRelevantCharts(results);
 
-      // Results tables
+      // Tables
       const out = [];
       const flights = results.flights?.flights || [];
       const hotels  = results.hotels?.hotels  || [];
       const cabs    = results.cabs?.cabs      || [];
+      const covid   = results.covid || null;
 
       if (flights.length) out.push(renderTable("Flights (top 10)", flights));
       if (hotels.length)  out.push(renderTable("Hotels (top 10)", hotels));
       if (cabs.length)    out.push(renderTable("Cabs/Transfers (top 10)", cabs));
 
+      // COVID summary
+      if (covid) {
+        const totals = covid.totals || {};
+        out.push(`
+          <h4>COVID Updates (${covid.location || covid.country || ""})</h4>
+          <div class="muted">Updated: ${covid.updated_utc || "latest available"}</div>
+          <table>
+            <tbody>
+              <tr><th>Total cases</th><td>${totals.cases ?? ""}</td><th>Total deaths</th><td>${totals.deaths ?? ""}</td></tr>
+              <tr><th>Active</th><td>${totals.active ?? ""}</td><th>Recovered</th><td>${totals.recovered ?? ""}</td></tr>
+              <tr><th>Today cases</th><td>+${totals.todayCases ?? ""}</td><th>Today deaths</th><td>+${totals.todayDeaths ?? ""}</td></tr>
+            </tbody>
+          </table>
+        `);
+      }
+
       document.getElementById("results").innerHTML = out.join("") || "<div class='muted'>No results yet.</div>";
 
-      // Update charts only if the category exists
-      if (flights.length) updateLineChart(flightsChart, flights, r => r.price_inr);
-      if (hotels.length)  updateLineChart(hotelsChart,  hotels,  r => (r.price_per_night_inr ?? r.price_total_inr));
-      if (cabs.length)    updateLineChart(cabsChart,    cabs,    r => r.fare_inr);
+      // Update charts only if data exists
 
-      // Update cheapest-over-time history (optional)
+      if (flights.length) {
+        const vals = flights.slice(0,12).map(r => Number(r.price_inr)).filter(v => Number.isFinite(v));
+        const labels = vals.map((_, i) => String(i+1));
+        updateLineChart(flightsChart, labels, vals, "Flight prices (INR)");
+      }
+
+      if (hotels.length) {
+        const vals = hotels.slice(0,12).map(r => Number(r.price_per_night_inr ?? r.price_total_inr)).filter(v => Number.isFinite(v));
+        const labels = vals.map((_, i) => String(i+1));
+        updateLineChart(hotelsChart, labels, vals, "Hotel prices (INR)");
+      }
+
+      if (cabs.length) {
+        const vals = cabs.slice(0,12).map(r => Number(r.fare_inr)).filter(v => Number.isFinite(v));
+        const labels = vals.map((_, i) => String(i+1));
+        updateLineChart(cabsChart, labels, vals, "Cab/Transfer prices (INR)");
+      }
+
+      // ✅ COVID full history chart (2020 → today), fallback to last14
+      if (covid) {
+        const full = covid.series_daily_cases || [];
+        const last14 = covid.last14_days || [];
+
+        if (full.length) {
+          document.getElementById("lblCovid").innerText = "COVID (daily new cases, 2020 → today)";
+          const labels = full.map(p => p.date);
+          const values = full.map(p => Number(p.value) || 0);
+          updateLineChart(covidChart, labels, values, "Daily new COVID cases (2020 → today)");
+        } else if (last14.length) {
+          document.getElementById("lblCovid").innerText = "COVID (last 14 days new cases)";
+          const labels = last14.map(p => p.date);
+          const values = last14.map(p => Number(p.new_cases) || 0);
+          updateLineChart(covidChart, labels, values, "Daily new COVID cases (last 14 days)");
+        }
+      }
+
+      // cheapest-over-time history
       queryCount += 1;
       const t = queryCount;
 
@@ -418,8 +476,6 @@
       queryHistory.push({ t, flights: cheapestFlights, hotels: cheapestHotels, cabs: cheapestCabs });
       updateHistoryChart();
 
-      // History card visibility handled by showRelevantCharts()
-
     }catch(e){
       setTyping(false);
       appendMessage("assistant", "Network error. Please try again.");
@@ -428,7 +484,6 @@
     }
   }
 
-  // Enter-to-send
   msgBox.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -436,10 +491,9 @@
     }
   });
 
-  // init charts + hide all by default + greeting
   initCharts();
   hideAllChartCards();
-  appendMessage("assistant", "Hi! Tell me what you want to book — flights, hotels, or cabs.");
+  appendMessage("assistant", "Hi! Tell me what you want to book — flights, hotels, cabs, or COVID updates.");
 </script>
 
 </body>

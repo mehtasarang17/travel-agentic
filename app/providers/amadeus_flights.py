@@ -1,6 +1,6 @@
 import os
 from typing import Dict, List, Optional, Tuple
-
+from amadeus import Location, ResponseError
 from amadeus import Client, ResponseError, Location
 from app.providers.base import FlightsProvider
 
@@ -147,3 +147,52 @@ class AmadeusFlightsProvider(FlightsProvider):
             })
 
         return sorted(out, key=lambda x: x["price_inr"])
+
+
+
+
+    def resolve_location_country(self, query: str) -> dict:
+        """
+        Resolve a city/airport keyword to a location and return countryCode.
+        Uses Amadeus SDK reference_data.locations.get (no custom _get needed).
+        Returns:
+          {"iataCode": "...", "name": "...", "countryCode": "IN", "subType": "CITY/AIRPORT", "cityName": "..."}
+        """
+        q = (query or "").strip()
+        if not q:
+            return {}
+
+        try:
+            resp = self.client.reference_data.locations.get(
+                keyword=q,
+                subType=Location.ANY,  # CITY, AIRPORT
+            )
+        except ResponseError:
+            return {}
+
+        items = resp.data or []
+        if not items:
+            # fallback: prefix search helps autocomplete
+            if len(q) >= 3:
+                try:
+                    resp = self.client.reference_data.locations.get(
+                        keyword=q[:3],
+                        subType=Location.ANY,
+                    )
+                    items = resp.data or []
+                except ResponseError:
+                    return {}
+            if not items:
+                return {}
+
+        # pick best candidate (your _search_locations already sorts CITY first)
+        it = items[0]
+        addr = it.get("address") or {}
+
+        return {
+            "iataCode": it.get("iataCode"),
+            "name": it.get("name"),
+            "subType": it.get("subType"),
+            "countryCode": addr.get("countryCode"),
+            "cityName": addr.get("cityName"),
+        }
